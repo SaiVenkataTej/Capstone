@@ -1,0 +1,50 @@
+# ============================================================================
+# Video Anomaly Detection (WS-MIL) - Global Configuration
+# ============================================================================
+
+# Data Configuration
+data:
+  train_csv: "xd_CLIP_rgb.csv"
+  test_csv: "xd_CLIP_rgbtest.csv"
+  train_features_dir: "XDTrainClipFeatures"
+  test_features_dir: "XDTestClipFeatures"
+  output_dir: "xd_violence_data"
+  batch_size: 32
+  num_workers: null  # Auto-selects (0 on Windows, 4 on Linux)
+  val_split: 0.2
+  pin_memory: null  # Auto-selects based on CUDA availability
+  expected_snippets: 10
+  feature_dim: 512
+
+# Model Architecture
+model:
+  input_dim: 512
+  hidden_dims: [256, 128]
+  dropout_rate: 0.5
+  k: 5  # Top-K snippets for ranking loss
+  smooth_weight: 0.01  # Temporal smoothness penalty
+
+# Training Hyperparameters
+training:
+  num_epochs: 50
+  learning_rate: 0.0001
+  weight_decay: 0.00001
+  step_size: 10
+  gamma: 0.5
+  patience: 10
+  grad_clip: 1.0
+  seed: 42
+  device: "cuda"  # "cuda" or "cpu"
+
+# Inference & Post-Processing
+inference:
+  threshold: 0.5
+  temporal_smoothing:
+    enabled: true
+    sigma: 1.0
+    filter_type: "gaussian"  # "gaussian", "moving_average", "none"
+
+# Output & Logging
+logging:
+  output_dir: "./experiments"
+  log_level: "INFO"

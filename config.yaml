@@ -1,0 +1,38 @@
+# Centralized configuration reference
+# See configs/config.yaml for full hyperparameter specifications
+
+data:
+  train_csv: "xd_CLIP_rgb.csv"
+  test_csv: "xd_CLIP_rgbtest.csv"
+  batch_size: 32
+  val_split: 0.2
+  expected_snippets: 10
+  feature_dim: 512
+
+model:
+  input_dim: 512
+  hidden_dims: [256, 128]
+  dropout_rate: 0.5
+  k: 5
+  smooth_weight: 0.01
+
+training:
+  num_epochs: 50
+  learning_rate: 0.0001
+  weight_decay: 0.00001
+  step_size: 10
+  gamma: 0.5
+  patience: 10
+  grad_clip: 1.0
+  seed: 42
+  device: "cuda"
+
+inference:
+  threshold: 0.5
+  temporal_smoothing:
+    enabled: true
+    sigma: 1.0
+    filter_type: "gaussian"
+
+logging:
+  output_dir: "./experiments"

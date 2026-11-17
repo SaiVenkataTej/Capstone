@@ -1,0 +1,71 @@
+# Python virtual environments
+.venv/
+venv/
+env/
+
+# Python cache and tooling
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+
+# Local editor / IDE files
+.vscode/
+.idea/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Project-generated artifacts / local runtime files
+experiments/
+uploads/
+archive/
+*.log
+*.db
+*.sqlite3
+*.csv
+*.pdf
+*.tex
+*.zip
+*.tar
+*.gz
+*.tar.gz
+
+# Large feature / dataset artifacts
+XDTrainClipFeatures/
+XDTestClipFeatures/
+
+# Optional local notebooks / scratch files
+*.ipynb_checkpoints/
+*.tmp
+*.bak
+
+# Environment secrets/config
+.env
+.env.*
+
+# Keep project source and docs tracked
+!src/
+!tests/
+!configs/
+!README.md
+!FILE_MANIFEST.md
+!MODULAR_BLOCKS_GUIDE.md
+!Dockerfile
+!requirements.txt
+!train.py
+!evaluate.py
+!dashboard.py
+!api.py
+!setup_xd_violence_pipeline.py
+!compare_losses.py
+!tune.py
+!train_optimal_models.py
+!analyze_custom_video.py
+!generate_revised_paper.py
+!config.yaml
