@@ -95,6 +95,9 @@ class MILAnomalyDetector(nn.Module):
         **loss_kwargs
     ):
         super(MILAnomalyDetector, self).__init__()
+        self.input_dim = input_dim
+        self.hidden_dims = hidden_dims or [256, 128]
+        self.dropout_rate = dropout_rate
         self.scorer = TemporalScoringNetwork(
             input_dim=input_dim,
             hidden_dims=hidden_dims,
@@ -168,16 +171,38 @@ class MILAnomalyDetector(nn.Module):
         checkpoint_path: Union[str, Path],
         device: Union[str, torch.device] = "cpu"
     ) -> Dict[str, Any]:
-        """Load weights from a checkpoint file."""
+        """Load weights from a checkpoint file, automatically adapting architecture if dimensions differ."""
         path = Path(checkpoint_path)
         if not path.exists():
             raise FileNotFoundError(f"Checkpoint not found at: {path.resolve()}")
             
         checkpoint = torch.load(path, map_location=device, weights_only=False)
-        if "model_state_dict" in checkpoint:
-            self.load_state_dict(checkpoint["model_state_dict"])
-        else:
-            self.load_state_dict(checkpoint)
+        state_dict = checkpoint["model_state_dict"] if "model_state_dict" in checkpoint else checkpoint
+        
+        # Auto-detect hidden architecture from checkpoint weights if necessary
+        if "scorer.mlp.0.weight" in state_dict:
+            ckpt_in_dim = state_dict["scorer.mlp.0.weight"].shape[1]
+            h1 = state_dict["scorer.mlp.0.weight"].shape[0]
+            detected_hidden_dims = [h1]
+            if "scorer.mlp.4.weight" in state_dict:
+                h2 = state_dict["scorer.mlp.4.weight"].shape[0]
+                detected_hidden_dims.append(h2)
+            
+            # Check current scorer dimensions
+            current_h1 = self.scorer.mlp[0].weight.shape[0]
+            current_h2 = self.scorer.mlp[4].weight.shape[0] if len(self.scorer.mlp) > 5 else None
+            current_dims = [current_h1] + ([current_h2] if current_h2 is not None else [])
+            
+            if current_dims != detected_hidden_dims or ckpt_in_dim != self.input_dim:
+                self.input_dim = ckpt_in_dim
+                self.hidden_dims = detected_hidden_dims
+                self.scorer = TemporalScoringNetwork(
+                    input_dim=ckpt_in_dim,
+                    hidden_dims=detected_hidden_dims,
+                    dropout_rate=self.dropout_rate
+                )
+
+        self.load_state_dict(state_dict)
         self.to(device)
         self.eval()
         return checkpoint

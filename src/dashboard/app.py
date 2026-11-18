@@ -5,15 +5,30 @@ Provides interactive model inference, temporal score visualization, and incident
 
 from datetime import datetime
 from pathlib import Path
-from typing import Tuple
+import tempfile
+from typing import Optional, Tuple
+import cv2
 import numpy as np
 import pandas as pd
+from PIL import Image
 import plotly.graph_objects as go
 import streamlit as st
 import torch
 
 from src.api.database import IncidentDatabase
 from src.models.mil_model import MILAnomalyDetector
+
+
+@st.cache_resource
+def get_cached_clip_extractor():
+    """Load and cache the CLIP ViT-B/16 visual feature extractor."""
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    try:
+        from analyze_custom_video import get_clip_extractor
+        extractor = get_clip_extractor(device)
+        return extractor, True, f"CLIP ViT-B/16 ready ({device})"
+    except Exception as e:
+        return None, False, f"CLIP extractor unavailable: {e}"
 
 
 @st.cache_resource
@@ -135,28 +150,108 @@ def show_overview(db: IncidentDatabase, is_loaded: bool):
 
 
 def show_inference(model: MILAnomalyDetector, db: IncidentDatabase):
-    st.title("📤 Video Feature Upload & Inference")
-    st.markdown("Upload pre-extracted CLIP visual embeddings (`.npy`) for real-time anomaly localization.")
+    st.title("📤 Video & Feature Inference")
+    st.markdown("Upload a raw video file (`.mp4`, `.avi`, `.mov`) or pre-extracted CLIP visual embeddings (`.npy`) for real-time anomaly localization. Uploaded videos and detection results are **automatically archived and logged**.")
     
     c_left, c_right = st.columns([2, 1])
     with c_left:
-        uploaded_file = st.file_uploader("Select CLIP Feature File (.npy)", type=["npy"])
+        uploaded_file = st.file_uploader(
+            "Select Video or Feature File",
+            type=["mp4", "avi", "mov", "mkv", "npy"]
+        )
     with c_right:
         threshold = st.slider("Anomaly Threshold", min_value=0.1, max_value=0.9, value=0.5, step=0.05)
         sigma = st.slider(r"Temporal Smoothing ($\sigma$)", min_value=0.0, max_value=3.0, value=1.0, step=0.1)
         
     if uploaded_file is not None:
+        filename = uploaded_file.name
+        is_video = any(filename.lower().endswith(ext) for ext in [".mp4", ".avi", ".mov", ".mkv"])
+        
         try:
-            feats = np.load(uploaded_file).copy()
-            if feats.ndim == 1:
-                feats = feats[np.newaxis, np.newaxis, :]
-            elif feats.ndim == 2:
-                feats = feats[np.newaxis, ...]
-            elif feats.ndim > 3:
-                feats = feats.mean(axis=tuple(range(2, feats.ndim)))
-                if feats.ndim == 2:
-                    feats = feats[np.newaxis, ...]
+            feats = None
+            fps = 30.0
+            snippet_len = 16
+            
+            # Ensure permanent uploads directory exists
+            upload_dir = Path("./uploads")
+            upload_dir.mkdir(parents=True, exist_ok=True)
+            
+            # Unique archived file name
+            timestamp_str = datetime.now().strftime("%Y%m%d_%H%M%S")
+            archived_filename = f"{timestamp_str}_{filename}"
+            archived_path = upload_dir / archived_filename
+            
+            if is_video:
+                # 1. Permanently save uploaded video to uploads directory
+                file_bytes = uploaded_file.read()
+                archived_path.write_bytes(file_bytes)
+                
+                st.subheader("🎥 Video Preview")
+                st.video(str(archived_path))
+                st.caption(f"📁 Archived video path: `{archived_path.resolve()}`")
+                
+                # 2. Extract CLIP features
+                clip_fn, clip_ok, clip_msg = get_cached_clip_extractor()
+                if not clip_ok or clip_fn is None:
+                    st.error(f"Failed to initialize CLIP feature extractor: {clip_msg}")
+                    return
                     
+                cap = cv2.VideoCapture(str(archived_path))
+                if not cap.isOpened():
+                    st.error(f"Could not open video file: {filename}")
+                    return
+                    
+                fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+                total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+                
+                progress_bar = st.progress(0, text="Extracting CLIP ViT-B/16 snippet features...")
+                frames_buffer = []
+                snippet_features = []
+                frame_count = 0
+                
+                while cap.isOpened():
+                    ret, frame = cap.read()
+                    if not ret:
+                        break
+                    frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                    frames_buffer.append(Image.fromarray(frame_rgb))
+                    frame_count += 1
+                    
+                    if len(frames_buffer) == snippet_len:
+                        feat = clip_fn(frames_buffer)
+                        snippet_features.append(feat)
+                        frames_buffer = []
+                        if total_frames > 0:
+                            pct = min(1.0, frame_count / total_frames)
+                            progress_bar.progress(pct, text=f"Processing snippet {len(snippet_features)} ({frame_count}/{total_frames} frames)...")
+                            
+                if len(frames_buffer) > 0:
+                    feat = clip_fn(frames_buffer)
+                    snippet_features.append(feat)
+                    
+                cap.release()
+                progress_bar.progress(1.0, text="Feature extraction completed!")
+                
+                if snippet_features:
+                    feats = np.stack(snippet_features)[np.newaxis, ...]  # (1, num_snippets, 512)
+                else:
+                    st.error("No valid frames could be decoded from this video.")
+                    return
+            else:
+                # Pre-extracted .npy features - also archive a copy
+                file_bytes = uploaded_file.read()
+                archived_path.write_bytes(file_bytes)
+                feats = np.load(str(archived_path)).copy()
+                if feats.ndim == 1:
+                    feats = feats[np.newaxis, np.newaxis, :]
+                elif feats.ndim == 2:
+                    feats = feats[np.newaxis, ...]
+                elif feats.ndim > 3:
+                    feats = feats.mean(axis=tuple(range(2, feats.ndim)))
+                    if feats.ndim == 2:
+                        feats = feats[np.newaxis, ...]
+
+            # 3. Model Inference
             device = next(model.parameters()).device
             feats_tensor = torch.from_numpy(feats).float().to(device)
             
@@ -167,20 +262,54 @@ def show_inference(model: MILAnomalyDetector, db: IncidentDatabase):
             max_score = float(np.max(video_scores))
             is_anom = max_score >= threshold
             
+            # 4. Automatically Log Video and Anomalies to Database
+            db_record_name = archived_filename
+            db.log_video(
+                filename=db_record_name,
+                num_snippets=len(video_scores),
+                is_anomalous=is_anom,
+                max_score=max_score
+            )
+            db.log_anomalies(db_record_name, video_scores, threshold=threshold)
+            
+            # 5. Interactive Plotly Anomaly Timeline
             st.divider()
-            st.subheader("📈 Temporal Anomaly Profile")
+            st.subheader("📈 Temporal Anomaly Risk Profile")
+            
+            x_labels = []
+            hover_labels = []
+            flagged_intervals = []
+            
+            for i, score in enumerate(video_scores):
+                start_sec = (i * snippet_len) / fps
+                end_sec = ((i + 1) * snippet_len) / fps
+                time_range = f"{int(start_sec // 60):02d}:{int(start_sec % 60):02d} - {int(end_sec // 60):02d}:{int(end_sec % 60):02d}"
+                
+                if is_video:
+                    x_labels.append(f"{int(start_sec // 60):02d}:{int(start_sec % 60):02d}")
+                    hover_labels.append(f"Snippet #{i+1}<br>Time: {time_range}<br>Score: {score:.3f}")
+                else:
+                    x_labels.append(f"Snippet {i+1}")
+                    hover_labels.append(f"Snippet #{i+1}<br>Score: {score:.3f}")
+                    
+                if score >= threshold:
+                    flagged_intervals.append({
+                        "Snippet #": i + 1,
+                        "Time Window": time_range if is_video else f"Snippet {i+1}",
+                        "Anomaly Score": f"{score:.4f}",
+                        "Risk Level": "CRITICAL" if score >= 0.75 else "HIGH"
+                    })
             
             fig = go.Figure()
-            x_vals = [f"Snippet {i+1}" for i in range(len(video_scores))]
-            
             fig.add_trace(go.Scatter(
-                x=x_vals,
+                x=x_labels,
                 y=video_scores,
                 mode="lines+markers",
                 name="Anomaly Probability",
                 line=dict(color="#3b82f6", width=3),
                 marker=dict(size=8, color="#2563eb"),
-                hovertemplate="Snippet: %{x}<br>Score: %{y:.3f}<extra></extra>"
+                hoverinfo="text",
+                hovertext=hover_labels
             ))
             
             fig.add_hline(
@@ -193,13 +322,13 @@ def show_inference(model: MILAnomalyDetector, db: IncidentDatabase):
             
             fig.update_layout(
                 yaxis=dict(range=[0, 1.05], title="Anomaly Probability Score"),
-                xaxis=dict(title="Temporal Video Snippets (16 frames each)"),
+                xaxis=dict(title="Video Timeline (MM:SS)" if is_video else "Temporal Video Snippets"),
                 height=420,
                 margin=dict(l=40, r=40, t=30, b=40)
             )
             st.plotly_chart(fig, use_container_width=True)
             
-            # Classification Card
+            # 6. Classification Status & Auto-Save Confirmation
             res_col1, res_col2 = st.columns(2)
             with res_col1:
                 if is_anom:
@@ -208,18 +337,17 @@ def show_inference(model: MILAnomalyDetector, db: IncidentDatabase):
                     st.success(f"✅ **NORMAL VIDEO ACTIVITY** (Peak Score: **{max_score:.3f}**)")
                     
             with res_col2:
-                if st.button("💾 Save & Log to Audit Database", use_container_width=True):
-                    db.log_video(
-                        filename=uploaded_file.name,
-                        num_snippets=len(video_scores),
-                        is_anomalous=is_anom,
-                        max_score=max_score
-                    )
-                    db.log_anomalies(uploaded_file.name, video_scores, threshold=threshold)
-                    st.success("Successfully logged incident record to database!")
+                st.info(f"💾 **Auto-Saved**: Stored in `uploads/{archived_filename}` and logged {len(video_scores)} snippets to `incidents.db`.")
                     
+            # 7. Flagged Intervals Table
+            if flagged_intervals:
+                st.subheader("⚠️ Flagged Anomaly Intervals")
+                st.markdown(f"Detected **{len(flagged_intervals)}** suspicious snippet window(s) exceeding threshold `{threshold:.2f}`:")
+                df_intervals = pd.DataFrame(flagged_intervals)
+                st.dataframe(df_intervals, use_container_width=True)
+                
         except Exception as e:
-            st.error(f"Error processing feature file: {e}")
+            st.error(f"Error during video/feature analysis: {e}")
 
 
 def show_analytics(db: IncidentDatabase):

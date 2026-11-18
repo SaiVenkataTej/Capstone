@@ -62,6 +62,13 @@ class IncidentDatabase:
                     details TEXT
                 )
             """)
+            
+            # Auto-migrate schema: ensure max_score column exists in videos table
+            cursor.execute("PRAGMA table_info(videos)")
+            existing_cols = [c[1] for c in cursor.fetchall()]
+            if "max_score" not in existing_cols:
+                cursor.execute("ALTER TABLE videos ADD COLUMN max_score REAL DEFAULT 0.0")
+                
             conn.commit()
 
     def log_video(
